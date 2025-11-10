@@ -49,6 +49,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         antialiasing=pipe.antialiasing
     )
 
+
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz
@@ -87,6 +88,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    
     if separate_sh:
         rendered_image, radii, depth_image = rasterizer(
             means3D = means3D,

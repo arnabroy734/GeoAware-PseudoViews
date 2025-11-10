@@ -272,7 +272,7 @@ class GaussianModel:
             else:
                 print(f"No exposure to be loaded at {exposure_file}")
                 self.pretrained_exposures = None
-
+               
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)

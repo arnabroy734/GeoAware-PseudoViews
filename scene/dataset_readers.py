@@ -184,6 +184,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
             cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
             cam_names = sorted(cam_names)
             test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
+            print(f"\n\nTEST CAMERAS {test_cam_names_list}\n\n {path}")
+
         else:
             with open(os.path.join(path, "sparse/0", "test.txt"), 'r') as file:
                 test_cam_names_list = [line.strip() for line in file]
@@ -202,7 +204,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    ply_path = os.path.join(path, "fused.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
     if not os.path.exists(ply_path):
