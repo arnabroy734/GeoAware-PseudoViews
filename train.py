@@ -29,6 +29,8 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from lpipsPyTorch import lpips
 import json
 from augment import PseudoViewGeneratorTraining
+from maskgen import find_hi_freq_gaussians
+from depth_prune import DepthSegmentationPruning
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -48,7 +50,10 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, pseudo_view):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations,
+             checkpoint_iterations, checkpoint, 
+             debug_from, pseudo_view: bool,
+             alt_densification: bool , alt_depth_prune: bool):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -98,7 +103,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # Pseudo view
     if pseudo_view: 
         pseudo_view_gen = PseudoViewGeneratorTraining(dataset.source_path)
-
+    
+    # depth prune
+    if alt_depth_prune: 
+        depth_seg_pruner = DepthSegmentationPruning(dataset.source_path)
+   
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -124,6 +133,38 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
+
+        # alternate densification
+        if alt_densification: 
+            stage2 = iteration % 200 >= 100
+            check = (iteration > 1500 and stage2)
+            if iteration<=1500:
+                opt.densify_grad_threshold = 0.0005
+                opt.prune_threshold = 0.005
+            else:
+                if check:
+                #print("Low denf")
+                    opt.densify_grad_threshold = 0.0005
+                    opt.prune_threshold = 0.1
+                else:
+                #print("High denf")
+                    opt.densify_grad_threshold = 0.0002
+                    opt.prune_threshold = 0.005
+
+        if alt_depth_prune: 
+            stage2 = iteration % 200 >= 100
+            check = (iteration > 1500 and stage2)
+            if iteration<=1500:
+                opt.densify_grad_threshold = 0.0005
+            else:
+                if check:
+                #print("Low denf")
+                    opt.densify_grad_threshold = 0.0005
+                    if iteration % opt.densification_interval == 0: # depth seg prune
+                        depth_seg_pruner.prune(gaussians, pipe, background, viewpoint_cam)
+                else:
+                #print("High denf")
+                    opt.densify_grad_threshold = 0.0002
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -156,15 +197,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # pseudo view loss - each 50 steps
-        if pseudo_view and (iteration+1) % 5 == 0:
+        # pseudo view loss - each 5 steps
+        if pseudo_view and iteration % 5 == 0:
             pseudo_cam, warped, mask = pseudo_view_gen.generate_pseudo_view(viewpoint_cam)
             rendered = render(pseudo_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)['render']
-            # pseudo_Ll1 = l1_loss(rendered*mask, warped*mask)
-            # pseudo_ssim_value = ssim(rendered*mask, warped*mask)
-            # pseudo_loss = (1.0 - opt.lambda_dssim) * pseudo_Ll1 + opt.lambda_dssim * (1.0 - pseudo_ssim_value)
-            pseudo_loss = torch.sum(lpips(rendered*mask, warped*mask))
+            # pseudo_loss = torch.sum(lpips(rendered*mask, warped*mask)) 
+            pseudo_loss = (1.0 - opt.lambda_dssim)*l1_loss(rendered*mask, warped*mask) + opt.lambda_dssim * (1.0 - ssim(rendered*mask, warped*mask))
             loss += pseudo_loss
+        
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -184,15 +224,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         iter_end.record()
 
+        
+
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            if pseudo_view and (iteration+1)%5 == 0: 
-                ema_pseudo_loss_for_log = 0.4 * pseudo_loss.item() + 0.6 * ema_pseudo_loss_for_log
+            if pseudo_view and iteration%5 == 0: 
+                ema_pseudo_loss_for_log = 0.4 * pseudo_loss.item() + 0.6 * ema_pseudo_loss_for_log 
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Pseudo Loss": f"{ema_pseudo_loss_for_log: .{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}",
+                                        #   "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}",
+                                          "Pseudo Loss": f"{ema_pseudo_loss_for_log: .{7}f}"
+                                        }
+                                    )
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -210,8 +256,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    # size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    size_threshold = None
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.prune_threshold,
+                                                scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -231,6 +279,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+        
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -329,13 +379,16 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[2000, 4000, 10000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[2000, 4000, 10000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--pseudo_view', action='store_true', default=False)
+    parser.add_argument('--alt_densification', action='store_true', default=False)
+    parser.add_argument('--alt_depth_prune', action='store_true', default=False)
+
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -356,7 +409,9 @@ if __name__ == "__main__":
             args.checkpoint_iterations,
             args.start_checkpoint,
             args.debug_from,
-            args.pseudo_view
+            args.pseudo_view,
+            args.alt_densification,
+            args.alt_depth_prune
         )
 
     # All done

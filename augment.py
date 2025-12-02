@@ -18,6 +18,8 @@ import math
 from scene.colmap_loader import rotmat2qvec, qvec2rotmat
 from scene.cameras import PseudoCamera
 from pathlib import PosixPath
+from utils.loss_utils import l1_loss, ssim
+# from depth_anything_V2.depth_anything_v2.dpt import DepthAnythingV2
 import warnings 
 warnings.filterwarnings('ignore')
 
@@ -56,6 +58,7 @@ class DepthMap:
 
         output = prediction.cpu().numpy()
         return output
+
 
 def _get_K(input_path):
     """
@@ -782,6 +785,8 @@ class PseudoViewGeneratorTraining:
 
         img = (tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         return img
+
+
 
 if __name__=="__main__": 
     parser = ArgumentParser("Colmap converter")
